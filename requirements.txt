@@ -1,0 +1,6 @@
+Pillow
+
+openai
+google-genai
+
+tavily-python

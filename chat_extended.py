@@ -5,7 +5,7 @@ import datetime
 import math
 import argparse
 import threading
-from typing import Any
+from typing import Any, Union
 from PIL import Image
 
 from apikeys import googleai_key, tavily_key
@@ -13,6 +13,7 @@ from agentlib import (
     ExtendedAgent,
     AgentCallbacks,
     GoogleBackend,
+    OpenAIBackend,
     Tool,
     TurnInput,
     TurnOutput,
@@ -143,11 +144,17 @@ def main():
         skills = discover_skills(skills_dir)
 
     # Setup tools confirmation callback for exec_cmd
-    def confirm_callback(cmd: str) -> bool:
+    def confirm_callback(cmd: str) -> Union[bool, str]:
         try:
             sys.stdout.flush()
-            answer = input(f"\n[Confirm Execution] Run command: '{cmd}'? (y/N): ").strip().lower()
-            return answer in ("y", "yes")
+            answer = input(f"\n[Confirm Execution] Run command: '{cmd}'?\nConfirm (y/n) or enter feedback for the model: ").strip()
+            answer_lower = answer.lower()
+            if answer_lower in ("y", "yes"):
+                return True
+            elif answer_lower in ("n", "no") or not answer:
+                return False
+            else:
+                return answer
         except Exception:
             return False
 
@@ -162,9 +169,15 @@ def main():
     agent_tools = [time_tool, calc_tool] + ws_tools.get_tools() + web_tools.get_tools()
 
     print("Initializing Google Gemini Agent Backend...")
-    backend = GoogleBackend(
-        api_key=googleai_key,
-        model_name=args.model
+    # backend = GoogleBackend(
+    #     api_key=googleai_key,
+    #     model_name=args.model
+    # )
+
+    backend = OpenAIBackend(
+        api_key="no key needed",
+        model_name=args.model,
+        base_url="http://127.0.0.1:8080/v1",
     )
 
     finished_event = threading.Event()

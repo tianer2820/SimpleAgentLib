@@ -2,7 +2,7 @@ import os
 import subprocess
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Union
 from tavily import TavilyClient
 
 
@@ -19,7 +19,7 @@ class WorkspaceTools:
         self,
         workspace_root: Optional[str] = None,
         sandbox_enabled: bool = True,
-        confirm_cmd_callback: Optional[Callable[[str], bool]] = None
+        confirm_cmd_callback: Optional[Callable[[str], Union[bool, str]]] = None
     ):
         """
         Initializes the WorkspaceTools wrapper.
@@ -27,7 +27,7 @@ class WorkspaceTools:
         Args:
             workspace_root: Absolute path to the allowed workspace root. Defaults to current directory.
             sandbox_enabled: If True, blocks accessing files/folders outside the workspace root.
-            confirm_cmd_callback: Optional callback accepting the command string and returning a bool.
+            confirm_cmd_callback: Optional callback accepting the command string and returning a bool or feedback string.
         """
         self.workspace_root = Path(workspace_root or os.getcwd()).resolve()
         self.sandbox_enabled = sandbox_enabled
@@ -266,8 +266,11 @@ class WorkspaceTools:
             timeout: Maximum time in seconds to wait for execution to complete. Defaults to 30.
         """
         if self.confirm_cmd_callback is not None:
-            if not self.confirm_cmd_callback(command):
+            callback_result = self.confirm_cmd_callback(command)
+            if callback_result is False:
                 return "Error: Command execution denied by user."
+            elif isinstance(callback_result, str):
+                return f"Error: Command execution denied by user. Feedback: {callback_result}"
 
         run_cwd = self.workspace_root
         if cwd:

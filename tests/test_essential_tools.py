@@ -280,6 +280,20 @@ class TestWorkspaceTools(unittest.TestCase):
         self.assertIn("Error: Command execution denied by user.", res_denied)
         self.assertEqual(denied_calls, ["echo 'denied'"])
 
+        # 3. Feedback callback
+        feedback_calls = []
+        def feedback_cb(cmd: str) -> str:
+            feedback_calls.append(cmd)
+            return "Please use a safer command."
+
+        tools_feedback = WorkspaceTools(
+            workspace_root=str(self.workspace_path),
+            confirm_cmd_callback=feedback_cb
+        )
+        res_feedback = tools_feedback.exec_cmd("echo 'feedback'")
+        self.assertIn("Error: Command execution denied by user. Feedback: Please use a safer command.", res_feedback)
+        self.assertEqual(feedback_calls, ["echo 'feedback'"])
+
 
 class TestWebTools(unittest.TestCase):
 

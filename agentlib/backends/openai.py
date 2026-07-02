@@ -24,7 +24,7 @@ class OpenAIBackend(ModelBackend):
         super().__init__(max_concurrency=max_concurrency)
         self.api_key = api_key
         self.model_name = model_name
-        self.client = openai.OpenAI(api_key=api_key)
+        self.client = openai.OpenAI(api_key=api_key, **kwargs)
 
     def _chat_impl(self, context: ChatContext, tools: Optional[List[Tool]] = None) -> TurnOutput:
         """Translates custom context structures into OpenAI API format and executes the call."""

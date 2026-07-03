@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simpleagentlib"
+version = "0.1.0"
+description = "A highly customizable, thread-safe, general-purpose Python agent framework"
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+    "Pillow>=9.0.0",
+    "openai>=1.0.0",
+    "google-genai>=0.1.0",
+    "tavily-python>=0.3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentlib*"]

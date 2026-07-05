@@ -28,6 +28,10 @@ class AgentCallbacks:
         """Called when the tool execution loop finishes and the final response is ready."""
         pass
 
+    def on_error(self, error: Exception) -> None:
+        """Called when a background processing thread encounters an error."""
+        pass
+
 
 class AgentQueue:
     """Thread-safe queue with prepend capability to facilitate text merging."""
@@ -82,6 +86,7 @@ class Agent:
         self.terminating_tool_calls = terminating_tool_calls or []
         
         self.queue = AgentQueue()
+        self.error = None
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -125,81 +130,84 @@ class Agent:
 
     def _run_loop(self) -> None:
         """Main processing thread loop."""
-        while not self._stop_event.is_set():
-            turn_input = self.queue.get()
-            if turn_input is None:
-                break
+        try:
+            while not self._stop_event.is_set():
+                turn_input = self.queue.get()
+                if turn_input is None:
+                    break
 
-            # 1. Consolidate consecutive pure text inputs
-            if self._is_pure_text(turn_input):
+                # 1. Consolidate consecutive pure text inputs
+                if self._is_pure_text(turn_input):
+                    while True:
+                        try:
+                            next_input = self.queue.get_nowait()
+                            if next_input is None:
+                                break
+                            if self._is_pure_text(next_input):
+                                turn_input.perm_text.extend(next_input.perm_text)
+                            else:
+                                self.queue.put_first(next_input)
+                                break
+                        except queue.Empty:
+                            break
+
+                # 2. Trigger on_input_processing callback (RAG)
+                turn_input = self._trigger_callback("on_input_processing", turn_input)
+
+                # 3. Add input to context turn
+                turn = ChatTurn(turn_input=turn_input)
+                self.context.conversations.append(turn)
+                self._trigger_callback("on_context_updated", self.context, "user_input", turn_input)
+
+                # 4. Multi-turn tool loops
                 while True:
-                    try:
-                        next_input = self.queue.get_nowait()
-                        if next_input is None:
-                            break
-                        if self._is_pure_text(next_input):
-                            turn_input.perm_text.extend(next_input.perm_text)
-                        else:
-                            self.queue.put_first(next_input)
-                            break
-                    except queue.Empty:
+                    # Call model backend (fills in turn_output inplace)
+                    turn_output = self.backend.chat(context=self.context, tools=self.tools)
+                    
+                    # Only trigger model_response update if the response contains text/thoughts
+                    if turn_output.text or turn_output.thought:
+                        self._trigger_callback("on_context_updated", self.context, "model_response", turn_output)
+
+                    if not turn_output.tool_calls:
                         break
 
-            # 2. Trigger on_input_processing callback (RAG)
-            turn_input = self._trigger_callback("on_input_processing", turn_input)
+                    self._trigger_callback("on_context_updated", self.context, "tool_calls", turn_output.tool_calls)
 
-            # 3. Add input to context turn
-            turn = ChatTurn(turn_input=turn_input)
-            self.context.conversations.append(turn)
-            self._trigger_callback("on_context_updated", self.context, "user_input", turn_input)
+                    tool_responses = []
+                    should_terminate = False
 
-            # 4. Multi-turn tool loops
-            while True:
-                # Call model backend (fills in turn_output inplace)
-                turn_output = self.backend.chat(context=self.context, tools=self.tools)
-                
-                # Only trigger model_response update if the response contains text/thoughts
-                if turn_output.text or turn_output.thought:
-                    self._trigger_callback("on_context_updated", self.context, "model_response", turn_output)
+                    for call in turn_output.tool_calls:
+                        tool = self._find_tool(call.name)
+                        if tool:
+                            try:
+                                res = tool(**call.args)
+                                content = str(res)
+                            except Exception as e:
+                                content = f"Error executing tool: {e}"
+                        else:
+                            content = f"Error: Tool '{call.name}' not found."
 
-                if not turn_output.tool_calls:
-                    break
+                        tool_responses.append(ToolResponse(
+                            tool_call_id=call.id,
+                            name=call.name,
+                            content=content
+                        ))
 
-                self._trigger_callback("on_context_updated", self.context, "tool_calls", turn_output.tool_calls)
+                        if call.name in self.terminating_tool_calls:
+                            should_terminate = True
 
-                tool_responses = []
-                should_terminate = False
+                    self._trigger_callback("on_context_updated", self.context, "tool_responses", tool_responses)
 
-                for call in turn_output.tool_calls:
-                    tool = self._find_tool(call.name)
-                    if tool:
-                        try:
-                            res = tool(**call.args)
-                            content = str(res)
-                        except Exception as e:
-                            content = f"Error executing tool: {e}"
-                    else:
-                        content = f"Error: Tool '{call.name}' not found."
+                    # Add tool response as a new context turn
+                    new_input = TurnInput(tool_responses=tool_responses)
+                    new_turn = ChatTurn(turn_input=new_input)
+                    self.context.conversations.append(new_turn)
 
-                    tool_responses.append(ToolResponse(
-                        tool_call_id=call.id,
-                        name=call.name,
-                        content=content
-                    ))
+                    if should_terminate:
+                        break
 
-                    if call.name in self.terminating_tool_calls:
-                        should_terminate = True
-
-                self._trigger_callback("on_context_updated", self.context, "tool_responses", tool_responses)
-
-                # Add tool response as a new context turn
-                new_input = TurnInput(tool_responses=tool_responses)
-                new_turn = ChatTurn(turn_input=new_input)
-                self.context.conversations.append(new_turn)
-
-                if should_terminate:
-                    break
-
-            # 5. Output completed turn
-            self._trigger_callback("on_final_output", self.context.conversations[-1].turn_output)
-        pass
+                # 5. Output completed turn
+                self._trigger_callback("on_final_output", self.context.conversations[-1].turn_output)
+        except Exception as e:
+            self.error = e
+            self._trigger_callback("on_error", e)

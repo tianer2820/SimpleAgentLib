@@ -99,9 +99,14 @@ class TestOpenAIBackend(unittest.TestCase):
             def __init__(self):
                 self.event = threading.Event()
                 self.output = None
+                self.error = None
                 
             def on_final_output(self, turn_output):
                 self.output = turn_output
+                self.event.set()
+
+            def on_error(self, error):
+                self.error = error
                 self.event.set()
 
         cb = WaitCallback()
@@ -122,6 +127,11 @@ class TestOpenAIBackend(unittest.TestCase):
         
         self.assertTrue(cb.event.wait(timeout=30))
         agent.stop()
+
+        if cb.error:
+            if "image input is not supported" in str(cb.error):
+                self.skipTest("Local server does not support image input")
+            raise cb.error
 
         self.assertIsNotNone(cb.output)
         self.assertIsNotNone(cb.output.text)

@@ -63,7 +63,7 @@ class TestExtendedAgent(unittest.TestCase):
         # Load skill via method call
         result = agent.load_skill("test_skill")
         self.assertIn("This is the full documentation for test_skill.", result)
-        self.assertIn("Folder Path: /path/to/test_skill", result)
+        self.assertIn("Skill Folder: /path/to/test_skill", result)
         
         # Loading non-existent skill
         result2 = agent.load_skill("unknown_skill")

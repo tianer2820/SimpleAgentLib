@@ -64,6 +64,19 @@ class TestWorkspaceTools(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.tools.write_file(file_path, "new content", overwrite=False)
 
+        # Append to existing file
+        append_result = self.tools.write_file(file_path, "\nLine 6", append=True)
+        self.assertIn("Successfully appended", append_result)
+        read_appended = self.tools.read_file(file_path)
+        self.assertEqual(read_appended, test_content + "\nLine 6")
+
+        # Append to new file
+        new_file_path = "subfolder/new_file.txt"
+        append_new_result = self.tools.write_file(new_file_path, "First line", append=True)
+        self.assertIn("Successfully appended", append_new_result)
+        read_new = self.tools.read_file(new_file_path)
+        self.assertEqual(read_new, "First line")
+
         # Try reading non-existent file
         with self.assertRaises(FileNotFoundError):
             self.tools.read_file("nonexistent.txt")
@@ -293,6 +306,103 @@ class TestWorkspaceTools(unittest.TestCase):
         res_feedback = tools_feedback.exec_cmd("echo 'feedback'")
         self.assertIn("Error: Command execution denied by user. Feedback: Please use a safer command.", res_feedback)
         self.assertEqual(feedback_calls, ["echo 'feedback'"])
+
+
+class TestPodmanWorkspaceTools(unittest.TestCase):
+
+    def setUp(self):
+        self.container_name = "test-container"
+        self.workspace_root = "/workspace"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="/workspace\n", stderr="")
+            self.tools = WorkspaceTools(
+                workspace_root=self.workspace_root,
+                workspace_type="podman",
+                podman_container=self.container_name,
+                sandbox_enabled=True
+            )
+
+    def test_path_resolution(self):
+        # Local relative path resolved inside container posix format
+        res = self.tools._resolve_path("sub/file.txt")
+        self.assertEqual(str(res), "/workspace/sub/file.txt")
+
+        # Local absolute path resolved inside container
+        res_abs = self.tools._resolve_path("/workspace/another.txt")
+        self.assertEqual(str(res_abs), "/workspace/another.txt")
+
+        # Escaping container sandbox
+        with self.assertRaises(PermissionError):
+            self.tools._resolve_path("../outside.txt")
+            
+        with self.assertRaises(PermissionError):
+            self.tools._resolve_path("/etc/passwd")
+
+    @patch("subprocess.run")
+    def test_exec_cmd(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="hello output\n", stderr="")
+        
+        res = self.tools.exec_cmd("echo 'hello'", cwd="sub")
+        self.assertIn("hello output", res)
+        
+        # Verify the correct podman arguments were constructed
+        self.assertEqual(mock_run.call_count, 2)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "podman")
+        self.assertEqual(args[1], "exec")
+        self.assertEqual(args[2], "-i")
+        self.assertEqual(args[3], "-w")
+        self.assertEqual(args[4], "/workspace/sub")
+        self.assertEqual(args[5], self.container_name)
+        self.assertEqual(args[6], "/bin/sh")
+        self.assertEqual(args[7], "-c")
+        self.assertEqual(args[8], "echo 'hello'")
+
+    @patch("subprocess.run")
+    def test_read_file(self, mock_run):
+        # We need to mock multiple subprocess calls
+        # 1. test -f (returns 0)
+        # 2. podman cp (returns 0)
+        mock_run.side_effect = [
+            MagicMock(returncode=0), # test -f
+            MagicMock(returncode=0)  # podman cp
+        ]
+        
+        # Mocking the open call on the host temp file
+        with patch("builtins.open", unittest.mock.mock_open(read_data="container file content")):
+            res = self.tools.read_file("test.txt")
+            self.assertEqual(res, "container file content")
+
+    @patch("subprocess.run")
+    def test_write_file(self, mock_run):
+        # 1. test -e (returns 1, not exists)
+        # 2. mkdir -p (returns 0)
+        # 3. podman cp (returns 0)
+        mock_run.side_effect = [
+            MagicMock(returncode=1), # test -e
+            MagicMock(returncode=0), # mkdir -p
+            MagicMock(returncode=0)  # podman cp
+        ]
+        
+        with patch("builtins.open", unittest.mock.mock_open()):
+            res = self.tools.write_file("sub/test.txt", "content")
+            self.assertIn("Successfully wrote", res)
+
+    @patch("subprocess.run")
+    def test_write_file_append(self, mock_run):
+        # File exists in container, we want to append.
+        mock_run.side_effect = [
+            MagicMock(returncode=0), # test -e (exists)
+            MagicMock(returncode=1), # test -d (not dir)
+            MagicMock(returncode=0), # mkdir -p
+            MagicMock(returncode=0), # podman cp from container
+            MagicMock(returncode=0)  # podman cp to container
+        ]
+        
+        with patch("builtins.open", unittest.mock.mock_open()) as mock_file:
+            res = self.tools.write_file("sub/test.txt", "more content", append=True)
+            self.assertIn("Successfully appended", res)
+            mock_file.assert_called_with(unittest.mock.ANY, "a", encoding="utf-8")
 
 
 class TestWebTools(unittest.TestCase):

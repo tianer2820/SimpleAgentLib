@@ -117,6 +117,17 @@ def parse_args():
         default="gemini-3.1-flash-lite",
         help="Google Gemini model name to use."
     )
+    parser.add_argument(
+        "--workspace-type",
+        choices=["local", "podman"],
+        default="local",
+        help="Workspace environment type (default: local)."
+    )
+    parser.add_argument(
+        "--podman-container",
+        default=None,
+        help="Podman container name or ID."
+    )
     return parser.parse_args()
 
 
@@ -137,11 +148,50 @@ def main():
             rules = [r.strip() for r in args.rules.split(",") if r.strip()]
 
     # Process workspace and skills
-    workspace = os.path.abspath(args.workspace)
-    skills_dir = os.path.join(workspace, ".agent")
+    temp_workspace_dir = None
+    workspace_for_skills = args.workspace
+    if args.workspace_type == "podman":
+        workspace = args.workspace
+        # Copy container .agent to host temp folder for skill discovery
+        import subprocess
+        import tempfile
+        import shutil
+        agent_dir_in_container = f"{workspace}/.agent"
+        res = subprocess.run(
+            ["podman", "exec", args.podman_container, "test", "-d", agent_dir_in_container],
+            capture_output=True
+        )
+        if res.returncode == 0:
+            temp_dir = tempfile.mkdtemp()
+            temp_workspace_dir = temp_dir
+            cp_cmd = ["podman", "cp", f"{args.podman_container}:{agent_dir_in_container}", temp_dir]
+            res_cp = subprocess.run(cp_cmd, capture_output=True)
+            if res_cp.returncode == 0:
+                workspace_for_skills = temp_dir
+            else:
+                shutil.rmtree(temp_dir)
+                temp_workspace_dir = None
+                workspace_for_skills = ""
+    else:
+        workspace = os.path.abspath(args.workspace)
+        workspace_for_skills = workspace
+
     skills = []
-    if os.path.isdir(skills_dir):
-        skills = discover_skills(skills_dir)
+    skills_dir = ""
+    if workspace_for_skills:
+        skills_dir = os.path.join(workspace_for_skills, ".agent")
+        if os.path.isdir(skills_dir):
+            skills = discover_skills(skills_dir)
+            if args.workspace_type == "podman" and temp_workspace_dir:
+                import posixpath
+                for skill in skills:
+                    if skill.path and skill.path.startswith(temp_workspace_dir):
+                        rel_path = os.path.relpath(skill.path, temp_workspace_dir)
+                        skill.path = posixpath.normpath(posixpath.join(workspace, rel_path))
+            
+    if temp_workspace_dir:
+        import shutil
+        shutil.rmtree(temp_workspace_dir)
 
     # Setup tools confirmation callback for exec_cmd
     def confirm_callback(cmd: str) -> Union[bool, str]:
@@ -162,7 +212,9 @@ def main():
     ws_tools = WorkspaceTools(
         workspace_root=workspace,
         sandbox_enabled=True,
-        confirm_cmd_callback=confirm_callback
+        confirm_cmd_callback=confirm_callback,
+        workspace_type=args.workspace_type,
+        podman_container=args.podman_container
     )
     web_tools = WebTools(api_key=tavily_key)
     

@@ -32,6 +32,10 @@ class AgentCallbacks:
         """Called when a background processing thread encounters an error."""
         pass
 
+    def on_stream_chunk(self, text: Optional[str], thought: Optional[str]) -> None:
+        """Called when a stream chunk is received from the LLM backend."""
+        pass
+
 
 class AgentQueue:
     """Thread-safe queue with prepend capability to facilitate text merging."""
@@ -162,7 +166,14 @@ class Agent:
                 # 4. Multi-turn tool loops
                 while True:
                     # Call model backend (fills in turn_output inplace)
-                    turn_output = self.backend.chat(context=self.context, tools=self.tools)
+                    def stream_cb(text_chunk: Optional[str], thought_chunk: Optional[str]) -> None:
+                        self._trigger_callback("on_stream_chunk", text_chunk, thought_chunk)
+
+                    turn_output = self.backend.chat(
+                        context=self.context,
+                        tools=self.tools,
+                        on_stream_chunk=stream_cb
+                    )
                     
                     # Only trigger model_response update if the response contains text/thoughts
                     if turn_output.text or turn_output.thought:

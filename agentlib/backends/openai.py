@@ -26,7 +26,12 @@ class OpenAIBackend(ModelBackend):
         self.model_name = model_name
         self.client = openai.OpenAI(api_key=api_key, **kwargs)
 
-    def _chat_impl(self, context: ChatContext, tools: Optional[List[Tool]] = None) -> TurnOutput:
+    def _chat_impl(
+        self,
+        context: ChatContext,
+        tools: Optional[List[Tool]] = None,
+        on_stream_chunk: Optional[Callable[[Optional[str], Optional[str]], None]] = None,
+    ) -> TurnOutput:
         """Translates custom context structures into OpenAI API format and executes the call."""
         
         # 1. Map Tool objects to OpenAI tool definitions
@@ -78,7 +83,6 @@ class OpenAIBackend(ModelBackend):
                 assistant_message = {"role": "assistant"}
                 
                 # Capture reasoning content (thoughts) if available
-                # (Can be passed as standard text or reasoning fields on compatible models)
                 if turn.turn_output.text:
                     assistant_message["content"] = turn.turn_output.text
                 
@@ -98,26 +102,99 @@ class OpenAIBackend(ModelBackend):
                 messages.append(assistant_message)
 
         # 3. Call ChatCompletion endpoint
-        kwargs = {"model": self.model_name, "messages": messages}
-        if openai_tools:
-            kwargs["tools"] = openai_tools
+        from typing import Callable
+        if on_stream_chunk:
+            kwargs = {"model": self.model_name, "messages": messages, "stream": True}
+            if openai_tools:
+                kwargs["tools"] = openai_tools
 
-        response = self.client.chat.completions.create(**kwargs)
-
-        # 4. Parse response into a TurnOutput
-        choice = response.choices[0].message
-        text = choice.content
-        
-        # Check if reasoning_content is returned (for o1/o3-type models)
-        thought = getattr(choice, "reasoning_content", None)
-
-        tool_calls = []
-        if choice.tool_calls:
-            for call in choice.tool_calls:
+            response = self.client.chat.completions.create(**kwargs)
+            
+            text_parts = []
+            reasoning_parts = []
+            tool_calls_accum = {}
+            
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                
+                # Text content
+                chunk_text = getattr(delta, "content", None)
+                if chunk_text:
+                    text_parts.append(chunk_text)
+                
+                # Reasoning / thoughts
+                chunk_thought = getattr(delta, "reasoning_content", None)
+                if chunk_thought:
+                    reasoning_parts.append(chunk_thought)
+                
+                # Trigger callback
+                if chunk_text or chunk_thought:
+                    on_stream_chunk(chunk_text, chunk_thought)
+                
+                # Tool calls delta
+                chunk_tool_calls = getattr(delta, "tool_calls", None)
+                if chunk_tool_calls:
+                    for tc_delta in chunk_tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_accum:
+                            tool_calls_accum[idx] = {
+                                "id": "",
+                                "name": "",
+                                "arguments_parts": []
+                            }
+                        
+                        if getattr(tc_delta, "id", None):
+                            tool_calls_accum[idx]["id"] = tc_delta.id
+                        if getattr(tc_delta, "function", None):
+                            fn_delta = tc_delta.function
+                            if getattr(fn_delta, "name", None):
+                                tool_calls_accum[idx]["name"] = fn_delta.name
+                            if getattr(fn_delta, "arguments", None):
+                                tool_calls_accum[idx]["arguments_parts"].append(fn_delta.arguments)
+            
+            # Reconstruct tool calls list
+            import time
+            tool_calls = []
+            for idx in sorted(tool_calls_accum.keys()):
+                accum = tool_calls_accum[idx]
+                args_str = "".join(accum["arguments_parts"])
+                try:
+                    args = json.loads(args_str) if args_str else {}
+                except Exception:
+                    args = {}
                 tool_calls.append(ToolCall(
-                    id=call.id,
-                    name=call.function.name,
-                    args=json.loads(call.function.arguments)
+                    id=accum["id"] or f"call_{int(time.time())}_{idx}",
+                    name=accum["name"],
+                    args=args
                 ))
+                
+            full_text = "".join(text_parts) if text_parts else None
+            full_thought = "".join(reasoning_parts) if reasoning_parts else None
+            return TurnOutput(thought=full_thought, text=full_text, tool_calls=tool_calls)
 
-        return TurnOutput(thought=thought, text=text, tool_calls=tool_calls)
+        else:
+            kwargs = {"model": self.model_name, "messages": messages}
+            if openai_tools:
+                kwargs["tools"] = openai_tools
+
+            response = self.client.chat.completions.create(**kwargs)
+
+            # 4. Parse response into a TurnOutput
+            choice = response.choices[0].message
+            text = choice.content
+            
+            # Check if reasoning_content is returned (for o1/o3-type models)
+            thought = getattr(choice, "reasoning_content", None)
+
+            tool_calls = []
+            if choice.tool_calls:
+                for call in choice.tool_calls:
+                    tool_calls.append(ToolCall(
+                        id=call.id,
+                        name=call.function.name,
+                        args=json.loads(call.function.arguments)
+                    ))
+
+            return TurnOutput(thought=thought, text=text, tool_calls=tool_calls)

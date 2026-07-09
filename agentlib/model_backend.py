@@ -78,6 +78,8 @@ class ModelBackend:
         self.max_concurrency = max_concurrency
         self.concurrency_lock = PriorityConcurrencyLock(max_concurrency)
 
+    from typing import Callable
+
     def chat(
         self,
         context: ChatContext,
@@ -85,6 +87,7 @@ class ModelBackend:
         retry_delay: float = 1.0,
         priority: int = 0,
         tools: Optional[List[Tool]] = None,
+        on_stream_chunk: Optional[Callable[[Optional[str], Optional[str]], None]] = None,
     ) -> TurnOutput:
         """
         Sends the context to the model with concurrency controls and retry backoffs.
@@ -93,7 +96,7 @@ class ModelBackend:
         with self.concurrency_lock.limit_concurrency(priority):
             for attempt in range(max_retry + 1):
                 try:
-                    turn_output = self._chat_impl(context, tools=tools)
+                    turn_output = self._chat_impl(context, tools=tools, on_stream_chunk=on_stream_chunk)
                     if context.conversations:
                         context.conversations[-1].turn_output = turn_output
                     return turn_output
@@ -104,6 +107,11 @@ class ModelBackend:
             # Should not reach here, but just in case
             raise Exception("Max retries exceeded")
 
-    def _chat_impl(self, context: ChatContext, tools: Optional[List[Tool]] = None) -> TurnOutput:
+    def _chat_impl(
+        self,
+        context: ChatContext,
+        tools: Optional[List[Tool]] = None,
+        on_stream_chunk: Optional[Callable[[Optional[str], Optional[str]], None]] = None,
+    ) -> TurnOutput:
         """Concrete backend execution logic. Must be overridden by subclasses."""
         raise NotImplementedError

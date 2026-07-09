@@ -156,5 +156,29 @@ class TestAgentLib(unittest.TestCase):
         # Verify RAG context mutation
         self.assertEqual(agent.context.conversations[0].turn_input.temp_text, ["RAG Context Added"])
 
+    def test_streaming_callback(self):
+        responses = [TurnOutput(thought="Thinking...", text="Hello, world!")]
+        backend = MockBackend(responses=responses)
+        streamed_chunks = []
+
+        class TestStreamingCallbacks(AgentCallbacks):
+            def on_stream_chunk(self, text, thought):
+                streamed_chunks.append((text, thought))
+
+        agent = Agent(
+            sys_prompt="System Prompt",
+            backend=backend,
+            callbacks=TestStreamingCallbacks()
+        )
+        
+        agent.send_input(TurnInput(perm_text=["Hi"]))
+        time.sleep(0.1)
+        agent.stop()
+
+        self.assertEqual(streamed_chunks, [
+            (None, "Thinking..."),
+            ("Hello, world!", None)
+        ])
+
 if __name__ == "__main__":
     unittest.main()

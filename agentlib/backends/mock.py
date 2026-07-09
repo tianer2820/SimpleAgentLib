@@ -15,14 +15,29 @@ class MockBackend(ModelBackend):
         self.call_count = 0
         self.lock = threading.Lock()
 
-    def _chat_impl(self, context: ChatContext, tools: Optional[List[Tool]] = None) -> TurnOutput:
+    from typing import Callable
+
+    def _chat_impl(
+        self,
+        context: ChatContext,
+        tools: Optional[List[Tool]] = None,
+        on_stream_chunk: Optional[Callable[[Optional[str], Optional[str]], None]] = None,
+    ) -> TurnOutput:
         """Simulates response extraction and delay in a thread-safe manner."""
         if self.delay > 0:
             time.sleep(self.delay)
             
         with self.lock:
             if not self.responses:
-                return TurnOutput(text="Mock response placeholder")
-            resp = self.responses[self.call_count % len(self.responses)]
-            self.call_count += 1
+                resp = TurnOutput(text="Mock response placeholder")
+            else:
+                resp = self.responses[self.call_count % len(self.responses)]
+                self.call_count += 1
+            
+            if on_stream_chunk:
+                if resp.thought:
+                    on_stream_chunk(None, resp.thought)
+                if resp.text:
+                    on_stream_chunk(resp.text, None)
+                    
             return resp

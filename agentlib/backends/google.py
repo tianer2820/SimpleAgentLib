@@ -14,9 +14,14 @@ class GoogleBackend(ModelBackend):
         super().__init__(max_concurrency=max_concurrency)
         self.api_key = api_key
         self.model_name = model_name
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=api_key, **kwargs)
 
-    def _chat_impl(self, context: ChatContext, tools: Optional[List[Tool]] = None) -> TurnOutput:
+    def _chat_impl(
+        self,
+        context: ChatContext,
+        tools: Optional[List[Tool]] = None,
+        on_stream_chunk: Optional[Callable[[Optional[str], Optional[str]], None]] = None,
+    ) -> TurnOutput:
         """Translates custom context structures into Gemini API formats and executes the call."""
         
         # 1. Map Tool objects to google.genai.types.Tool formats
@@ -91,48 +96,108 @@ class GoogleBackend(ModelBackend):
             tools=gemini_tools if gemini_tools else None
         )
 
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=gemini_contents,
-            config=config
-        )
+        from typing import Callable
+        if on_stream_chunk:
+            response = self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=gemini_contents,
+                config=config
+            )
+            text_parts = []
+            reasoning_parts = []
+            tool_calls = []
+            
+            for chunk in response:
+                chunk_text = None
+                chunk_thought = None
+                
+                # Check for reasoning_content (thoughts)
+                if chunk.candidates:
+                    cand = chunk.candidates[0]
+                    if hasattr(cand, "reasoning_content") and cand.reasoning_content:
+                        chunk_thought = cand.reasoning_content
+                        reasoning_parts.append(chunk_thought)
+                
+                # Check for text in parts
+                if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                    p_texts = [p.text for p in chunk.candidates[0].content.parts if p.text]
+                    if p_texts:
+                        chunk_text = "".join(p_texts)
+                        text_parts.append(chunk_text)
+                
+                # Trigger callback
+                if chunk_text or chunk_thought:
+                    on_stream_chunk(chunk_text, chunk_thought)
+                
+                # Check for function calls in parts
+                if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                    for part in chunk.candidates[0].content.parts:
+                        if part.function_call:
+                            call = part.function_call
+                            call_id = getattr(call, "id", None) or f"call_{int(time.time())}"
+                            thought_sig = getattr(part, "thought_signature", None)
+                            tool_calls.append(ToolCall(
+                                id=call_id,
+                                name=call.name,
+                                args=call.args,
+                                thought_signature=thought_sig
+                            ))
+                elif hasattr(chunk, "function_calls") and chunk.function_calls:
+                    for call in chunk.function_calls:
+                        call_id = getattr(call, "id", None) or f"call_{int(time.time())}"
+                        tool_calls.append(ToolCall(
+                            id=call_id,
+                            name=call.name,
+                            args=call.args,
+                            thought_signature=None
+                        ))
+            
+            full_text = "".join(text_parts) if text_parts else None
+            full_thought = "".join(reasoning_parts) if reasoning_parts else None
+            return TurnOutput(thought=full_thought, text=full_text, tool_calls=tool_calls)
 
-        # 4. Parse response parts into TurnOutput
-        # Manually extract text parts to bypass response.text and prevent stderr warnings
-        text = None
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            text_parts = [part.text for part in response.candidates[0].content.parts if part.text]
-            if text_parts:
-                text = "".join(text_parts)
+        else:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=gemini_contents,
+                config=config
+            )
 
-        thought = None
-        # Check if candidate has reasoning content
-        if response.candidates:
-            cand = response.candidates[0]
-            if hasattr(cand, "reasoning_content"):
-                thought = cand.reasoning_content
+            # 4. Parse response parts into TurnOutput
+            text = None
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                text_parts = [part.text for part in response.candidates[0].content.parts if part.text]
+                if text_parts:
+                    text = "".join(text_parts)
 
-        tool_calls = []
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.function_call:
-                    call = part.function_call
+            thought = None
+            # Check if candidate has reasoning content
+            if response.candidates:
+                cand = response.candidates[0]
+                if hasattr(cand, "reasoning_content"):
+                    thought = cand.reasoning_content
+
+            tool_calls = []
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.function_call:
+                        call = part.function_call
+                        call_id = getattr(call, "id", None) or f"call_{int(time.time())}"
+                        thought_sig = getattr(part, "thought_signature", None)
+                        tool_calls.append(ToolCall(
+                            id=call_id,
+                            name=call.name,
+                            args=call.args,
+                            thought_signature=thought_sig
+                        ))
+            elif response.function_calls:
+                for call in response.function_calls:
                     call_id = getattr(call, "id", None) or f"call_{int(time.time())}"
-                    thought_sig = getattr(part, "thought_signature", None)
                     tool_calls.append(ToolCall(
                         id=call_id,
                         name=call.name,
                         args=call.args,
-                        thought_signature=thought_sig
+                        thought_signature=None
                     ))
-        elif response.function_calls:
-            for call in response.function_calls:
-                call_id = getattr(call, "id", None) or f"call_{int(time.time())}"
-                tool_calls.append(ToolCall(
-                    id=call_id,
-                    name=call.name,
-                    args=call.args,
-                    thought_signature=None
-                ))
 
-        return TurnOutput(thought=thought, text=text, tool_calls=tool_calls)
+            return TurnOutput(thought=thought, text=text, tool_calls=tool_calls)
